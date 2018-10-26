@@ -3,68 +3,47 @@ import math
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.structures.game_data_struct import GameTickPacket
 
+from usystem import *
+from vec import Vec3, Orientation
+
 
 class PythonExample(BaseAgent):
 
     def initialize_agent(self):
-        #This runs once before the bot starts up
-        self.controller_state = SimpleControllerState()
+        choices = [
+            DribbleChoice(),
+            CollectBoostChoice()
+        ]
+        self.ut = UtilitySystem(choices)
 
-    def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
-        ball_location = Vector2(packet.game_ball.physics.location.x, packet.game_ball.physics.location.y)
-
-        my_car = packet.game_cars[self.index]
-        car_location = Vector2(my_car.physics.location.x, my_car.physics.location.y)
-        car_direction = get_car_facing_vector(my_car)
-        car_to_ball = ball_location - car_location
-
-        steer_correction_radians = car_direction.correction_to(car_to_ball)
-
-        if steer_correction_radians > 0:
-            # Positive radians in the unit circle is a turn to the left.
-            turn = -1.0  # Negative value for a turn to the left.
-        else:
-            turn = 1.0
-
-        self.controller_state.throttle = 1.0
-        self.controller_state.steer = turn
-
-        return self.controller_state
+    def get_output(self, gtp: GameTickPacket) -> SimpleControllerState:
+        packet = Packet(gtp, self)
+        task, need = self.ut.evaluate(packet)
+        controls = task.execute(packet)
+        return controls
 
 
-class Vector2:
-    def __init__(self, x=0, y=0):
-        self.x = float(x)
-        self.y = float(y)
+class Packet:
+    def __init__(self, gtp, bot):
+        info = gtp.game_cars[bot.index]
+        self.index = bot.index
+        self.my_sign = -1 if bot.team == 0 else 1
+        self.ball_prediction = bot.get_ball_prediction_struct()
+        self.my_pos = Vec3().set(info.physics.location)
+        self.my_vel = Vec3().set(info.physics.velocity)
+        self.my_ori = Orientation(info.physics.rotation)
+        self.boost = info.boost
 
-    def __add__(self, val):
-        return Vector2(self.x + val.x, self.y + val.y)
+        self.ball_pos = Vec3().set(gtp.game_ball.physics.location)
+        self.ball_vel = Vec3().set(gtp.game_ball.physics.velocity)
 
-    def __sub__(self, val):
-        return Vector2(self.x - val.x, self.y - val.y)
+        self.field_info = bot.get_field_info()
+        self.big_bpads = []
+        self.big_bpads_state = []
+        for i, pad in enumerate(self.field_info.boost_pads):
+            if pad.is_full_boost:
+                self.big_bpads.append(Vec3().set(pad.location))
+                self.big_bpads_state.append(gtp.game_boosts[i].is_active)
 
-    def correction_to(self, ideal):
-        # The in-game axes are left handed, so use -x
-        current_in_radians = math.atan2(self.y, -self.x)
-        ideal_in_radians = math.atan2(ideal.y, -ideal.x)
-
-        correction = ideal_in_radians - current_in_radians
-
-        # Make sure we go the 'short way'
-        if abs(correction) > math.pi:
-            if correction < 0:
-                correction += 2 * math.pi
-            else:
-                correction -= 2 * math.pi
-
-        return correction
-
-
-def get_car_facing_vector(car):
-    pitch = float(car.physics.rotation.pitch)
-    yaw = float(car.physics.rotation.yaw)
-
-    facing_x = math.cos(pitch) * math.cos(yaw)
-    facing_y = math.cos(pitch) * math.sin(yaw)
-
-    return Vector2(facing_x, facing_y)
+        self.renderer = bot.renderer
+        self.kickoff = gtp.game_info.is_kickoff_pause
